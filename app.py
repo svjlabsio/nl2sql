@@ -55,6 +55,10 @@ SAMPLE_PROMPTS = {
     ],
 }
 
+CROSS_SCHEMA_PROMPTS = [
+    ("Complex", "Compare month-over-month revenue growth with headcount changes over the last 6 months"),
+]
+
 # ---------------------------------------------------------------------------
 # DB helpers (cached)
 # ---------------------------------------------------------------------------
@@ -103,14 +107,13 @@ def invalidate_caches():
 import sqlparse as _sqlparse
 
 
+_WRITE_KEYWORDS = {"INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "TRUNCATE", "REPLACE"}
+
+
 def execute_sql(sql: str) -> tuple[pd.DataFrame | None, str | None]:
     """Execute a SELECT query against Neon and return (dataframe, error)."""
-    try:
-        stmt_type = _sqlparse.parse(sql)[0].get_type()
-    except Exception:
-        stmt_type = None
-
-    if stmt_type != "SELECT":
+    first_keyword = sql.strip().split()[0].upper() if sql.strip() else ""
+    if first_keyword in _WRITE_KEYWORDS:
         return None, "Only SELECT queries are executed automatically."
 
     conn = get_conn()
@@ -200,7 +203,7 @@ def delete_schema(schema_id: str):
 # ---------------------------------------------------------------------------
 
 
-def render_sidebar(schemas: list[dict]) -> dict | None:
+def render_sidebar(schemas: list[dict]) -> tuple[list[dict], bool]:
     st.sidebar.markdown("## 🔍 NL2SQL")
     st.sidebar.markdown(
         "Plain English → SQL using **Claude** + **pgvector** semantic schema search."
@@ -209,28 +212,40 @@ def render_sidebar(schemas: list[dict]) -> dict | None:
 
     if not schemas:
         st.sidebar.warning("No schemas found. Run `python scripts/seed_schemas.py`.")
-        return None
+        return [], False
 
+    cross_schema = st.sidebar.toggle("Cross-schema mode", value=False)
     schema_names = [f"{'⭐ ' if s['is_demo'] else ''}{s['name']}" for s in schemas]
-    idx = st.sidebar.selectbox("Schema", range(len(schemas)), format_func=lambda i: schema_names[i])
-    selected = schemas[idx]
-    st.sidebar.caption(selected.get("description") or "")
-    st.sidebar.badge(selected["dialect"].upper(), color="blue")
 
-    st.sidebar.markdown("**Tables**")
-    for table in load_schema_tables(str(selected["id"])):
-        with st.sidebar.expander(f"📋 {table['name']}", expanded=False):
-            for col in load_table_columns(str(table["id"])):
-                badges = (" 🔑" if col["is_primary_key"] else "") + (" 🔗" if col["is_foreign_key"] else "")
-                desc = f" — *{col['description']}*" if col.get("description") else ""
-                st.markdown(f"`{col['name']}` {col['data_type']}{badges}{desc}")
+    if cross_schema:
+        selected_indices = st.sidebar.multiselect(
+            "Schemas",
+            range(len(schemas)),
+            default=list(range(min(2, len(schemas)))),
+            format_func=lambda i: schema_names[i],
+        )
+        selected = [schemas[i] for i in selected_indices]
+    else:
+        idx = st.sidebar.selectbox("Schema", range(len(schemas)), format_func=lambda i: schema_names[i])
+        selected = [schemas[idx]]
 
-    if not selected["is_demo"]:
-        if st.sidebar.button("🗑 Delete schema", type="secondary"):
-            delete_schema(str(selected["id"]))
-            st.rerun()
+    for schema in selected:
+        label = f"**{schema['name']}**" if cross_schema else "**Tables**"
+        st.sidebar.caption(schema.get("description") or "")
+        st.sidebar.badge(schema["dialect"].upper(), color="blue")
+        st.sidebar.markdown(label)
+        for table in load_schema_tables(str(schema["id"])):
+            with st.sidebar.expander(f"📋 {table['name']}", expanded=False):
+                for col in load_table_columns(str(table["id"])):
+                    badges = (" 🔑" if col["is_primary_key"] else "") + (" 🔗" if col["is_foreign_key"] else "")
+                    desc = f" — *{col['description']}*" if col.get("description") else ""
+                    st.markdown(f"`{col['name']}` {col['data_type']}{badges}{desc}")
+        if not schema["is_demo"]:
+            if st.sidebar.button(f"🗑 Delete {schema['name']}", key=f"del_{schema['id']}", type="secondary"):
+                delete_schema(str(schema["id"]))
+                st.rerun()
 
-    return selected
+    return selected, cross_schema
 
 
 # ---------------------------------------------------------------------------
@@ -239,10 +254,7 @@ def render_sidebar(schemas: list[dict]) -> dict | None:
 
 
 def _run_query(schema: dict, nl_query: str):
-    """
-    Stream the NL2SQL pipeline into a two-column layout (SQL left, reasoning right),
-    then persist the finished result in st.session_state.
-    """
+    """Stream the NL2SQL pipeline in two columns (SQL left, reasoning right), then persist in session state."""
     import anthropic as _anthropic
     from lib.schema_pruner import get_schema_context
     from lib.prompt_builder import render_schema_ddl, build_system_prompt
@@ -256,27 +268,34 @@ def _run_query(schema: dict, nl_query: str):
 
     client = _anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-    st.markdown("**Generated SQL**")
-    sql_ph = st.empty()
-    sql_ph.markdown("*⚡ Generating...*")
+    col_left, col_right = st.columns([3, 2])
+    with col_left:
+        st.markdown("**Generated SQL**")
+        sql_ph = st.empty()
+        sql_ph.markdown("*⚡ Generating...*")
+    with col_right:
+        st.markdown("**Reasoning**")
+        thinking_box = st.container(height=420)
+        thinking_ph = thinking_box.empty()
+        thinking_ph.caption("*⚡ Analyzing...*")
 
     raw_buf = ""
 
     try:
         with client.messages.stream(
             model="claude-sonnet-4-6",
-            max_tokens=2048,
+            max_tokens=4096,
             system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": nl_query}],
         ) as stream:
             for token in stream.text_stream:
                 raw_buf += token
-                #s0 = raw_buf.find("<sql>")
-                #s1 = raw_buf.find("</sql>")
-                #if s0 >= 0:
-                #    sql_text = raw_buf[s0 + len("<sql>"): s1 if s1 >= 0 else len(raw_buf)]
-                #    if sql_text.strip():
-                #        sql_ph.code(sql_text.strip(), language="sql")
+                s0 = raw_buf.find("<sql>")
+                s1 = raw_buf.find("</sql>")
+                if s0 >= 0:
+                    sql_text = raw_buf[s0 + len("<sql>"): s1 if s1 >= 0 else len(raw_buf)]
+                    if sql_text.strip():
+                        sql_ph.code(sql_text.strip(), language="sql")
 
     except Exception as e:
         sql_ph.error(f"LLM error: {e}")
@@ -286,53 +305,192 @@ def _run_query(schema: dict, nl_query: str):
     thinking_m = re.search(r"<thinking>(.*?)</thinking>", raw_buf, re.DOTALL)
     sql_m = re.search(r"<sql>(.*?)</sql>", raw_buf, re.DOTALL)
     thinking = thinking_m.group(1).strip() if thinking_m else ""
-    raw_sql = sql_m.group(1).strip() if sql_m else raw_buf.strip()
+    if sql_m:
+        raw_sql = sql_m.group(1).strip()
+    else:
+        raw_sql = re.sub(r"<thinking>.*?</thinking>", "", raw_buf, flags=re.DOTALL).strip()
+
+    thinking_ph.markdown(thinking if thinking else "*No reasoning captured.*")
 
     is_valid, fmt_sql, error = validate_and_format(raw_sql)
 
     retries = 0
     if not is_valid:
-        with st.spinner(f"Auto-correcting SQL... ({error})"):
-            fixed = run_nl2sql(schema_id, schema["name"], schema["dialect"], nl_query)
+        with col_left:
+            with st.spinner(f"Auto-correcting SQL... ({error})"):
+                fixed = run_nl2sql(schema_id, schema["name"], schema["dialect"], nl_query)
         fmt_sql = fixed["sql"]
         thinking = fixed.get("thinking") or thinking
         error = fixed.get("error")
         retries = fixed.get("retries", 1)
 
-    _save_history(schema_id, nl_query, fmt_sql or raw_sql, thinking, error, retries)
+    final_sql = fmt_sql or raw_sql
 
-    st.session_state["result"] = {
+    with col_left:
+        if retries > 0:
+            st.caption(f"⚠ {retries} auto-correction retry(s) needed")
+        if error:
+            st.warning(f"Validation: {error}")
+        st.markdown("**Results**")
+        with st.spinner("Running query..."):
+            df, exec_error = execute_sql(final_sql)
+        if exec_error:
+            st.error(f"Execution error: {exec_error}")
+        elif df is None or df.empty:
+            st.info("Query returned no rows.")
+        else:
+            st.caption(f"{len(df)} row(s) — max 300 shown")
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
+    _save_history(schema_id, nl_query, final_sql, thinking, error, retries)
+
+    return {
         "query": nl_query,
-        "sql": fmt_sql or raw_sql,
+        "sql": final_sql,
         "thinking": thinking,
         "error": error,
         "retries": retries,
     }
 
 
+def _run_query_cross(schemas: list[dict], nl_query: str) -> dict:
+    """
+    Stream NL2SQL with all selected schemas merged into one prompt.
+    Because all tables live in the same Neon database, Claude can JOIN across them.
+    """
+    import anthropic as _anthropic
+    from lib.schema_pruner import get_schema_context
+    from lib.prompt_builder import render_schema_ddl, build_system_prompt
+    from lib.sql_validator import validate_and_format
+    from lib.nl2sql_pipeline import _save_history
+
+    # Merge relevant tables + columns from every schema
+    all_tables: list[dict] = []
+    all_columns_by_table: dict[str, list[dict]] = {}
+    all_examples: list[dict] = []
+    for schema in schemas:
+        ctx = get_schema_context(str(schema["id"]), nl_query)
+        all_tables.extend(ctx["tables"])
+        all_columns_by_table.update(ctx["columns_by_table"])
+        all_examples.extend(ctx["examples"])
+
+    combined_name = " + ".join(s["name"] for s in schemas)
+    dialect = schemas[0]["dialect"]
+    schema_ddl = render_schema_ddl(all_tables, all_columns_by_table)
+    system_prompt = build_system_prompt(combined_name, dialect, schema_ddl, all_examples[:3])
+
+    client = _anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+    col_left, col_right = st.columns([3, 2])
+    with col_left:
+        st.markdown("**Generated SQL**")
+        sql_ph = st.empty()
+        sql_ph.markdown("*⚡ Generating...*")
+    with col_right:
+        st.markdown("**Reasoning**")
+        thinking_box = st.container(height=420)
+        thinking_ph = thinking_box.empty()
+        thinking_ph.caption("*⚡ Analyzing...*")
+
+    raw_buf = ""
+    try:
+        with client.messages.stream(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": nl_query}],
+        ) as stream:
+            for token in stream.text_stream:
+                raw_buf += token
+                s0 = raw_buf.find("<sql>")
+                s1 = raw_buf.find("</sql>")
+                if s0 >= 0:
+                    sql_text = raw_buf[s0 + len("<sql>"): s1 if s1 >= 0 else len(raw_buf)]
+                    if sql_text.strip():
+                        sql_ph.code(sql_text.strip(), language="sql")
+    except Exception as e:
+        sql_ph.error(f"LLM error: {e}")
+        return {}
+
+    thinking_m = re.search(r"<thinking>(.*?)</thinking>", raw_buf, re.DOTALL)
+    sql_m = re.search(r"<sql>(.*?)</sql>", raw_buf, re.DOTALL)
+    thinking = thinking_m.group(1).strip() if thinking_m else ""
+    if sql_m:
+        raw_sql = sql_m.group(1).strip()
+    else:
+        raw_sql = re.sub(r"<thinking>.*?</thinking>", "", raw_buf, flags=re.DOTALL).strip()
+
+    thinking_ph.markdown(thinking if thinking else "*No reasoning captured.*")
+
+    is_valid, fmt_sql, error = validate_and_format(raw_sql)
+    retries = 0
+    if not is_valid:
+        with col_left:
+            with st.spinner(f"Auto-correcting SQL... ({error})"):
+                from lib.nl2sql_pipeline import run_nl2sql
+                fixed = run_nl2sql(str(schemas[0]["id"]), combined_name, dialect, nl_query)
+        fmt_sql = fixed["sql"]
+        thinking = fixed.get("thinking") or thinking
+        error = fixed.get("error")
+        retries = fixed.get("retries", 1)
+
+    final_sql = fmt_sql or raw_sql
+
+    with col_left:
+        if retries > 0:
+            st.caption(f"⚠ {retries} auto-correction retry(s) needed")
+        if error:
+            st.warning(f"Validation: {error}")
+        st.markdown("**Results**")
+        with st.spinner("Running query..."):
+            df, exec_error = execute_sql(final_sql)
+        if exec_error:
+            st.error(f"Execution error: {exec_error}")
+        elif df is None or df.empty:
+            st.info("Query returned no rows.")
+        else:
+            st.caption(f"{len(df)} row(s) — max 300 shown")
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
+    _save_history(str(schemas[0]["id"]), nl_query, final_sql, thinking, error, retries)
+
+    return {"query": nl_query, "sql": final_sql, "thinking": thinking, "error": error, "retries": retries}
+
+
 def _display_result(result: dict):
-    """Render a persisted result: SQL then query results."""
+    """Render a persisted result: SQL + results on left, fixed-height reasoning on right."""
     st.caption(f"Query: *{result['query']}*")
 
-    st.markdown("**Generated SQL**")
-    st.code(result["sql"], language="sql")
+    col_left, col_right = st.columns([3, 2])
 
-    if result.get("retries", 0) > 0:
-        st.caption(f"⚠ {result['retries']} auto-correction retry(s) needed")
-    if result.get("error"):
-        st.warning(f"Validation: {result['error']}")
+    with col_left:
+        st.markdown("**Generated SQL**")
+        st.code(result["sql"], language="sql")
 
-    st.markdown("**Results**")
-    with st.spinner("Running query..."):
-        df, exec_error = execute_sql(result["sql"])
+        if result.get("retries", 0) > 0:
+            st.caption(f"⚠ {result['retries']} auto-correction retry(s) needed")
+        if result.get("error"):
+            st.warning(f"Validation: {result['error']}")
 
-    if exec_error:
-        st.error(f"Execution error: {exec_error}")
-    elif df is None or df.empty:
-        st.info("Query returned no rows.")
-    else:
-        st.caption(f"{len(df)} row(s) — max 300 shown")
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.markdown("**Results**")
+        with st.spinner("Running query..."):
+            df, exec_error = execute_sql(result["sql"])
+
+        if exec_error:
+            st.error(f"Execution error: {exec_error}")
+        elif df is None or df.empty:
+            st.info("Query returned no rows.")
+        else:
+            st.caption(f"{len(df)} row(s) — max 300 shown")
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
+    with col_right:
+        st.markdown("**Reasoning**")
+        with st.container(height=420):
+            if result.get("thinking"):
+                st.markdown(result["thinking"])
+            else:
+                st.caption("No reasoning captured.")
 
 
 # ---------------------------------------------------------------------------
@@ -340,13 +498,15 @@ def _display_result(result: dict):
 # ---------------------------------------------------------------------------
 
 
-def render_query_tab(schema: dict):
-    schema_id = str(schema["id"])
-    schema_name = schema["name"]
+def render_query_tab(selected_schemas: list[dict], cross_schema: bool):
+    if not selected_schemas:
+        st.info("Select at least one schema from the sidebar.")
+        return
 
-    # Sample prompts
-    prompts = SAMPLE_PROMPTS.get(schema_name, [])
-    # Custom query input
+    schema = selected_schemas[0]
+    prompts = CROSS_SCHEMA_PROMPTS if cross_schema else SAMPLE_PROMPTS.get(schema["name"], [])
+    prompt_key_prefix = "cross" if cross_schema else str(schema["id"])
+
     nl_query = st.text_area(
         "Ask a question about your data:",
         height=80,
@@ -355,12 +515,11 @@ def render_query_tab(schema: dict):
     )
     if st.button("Generate SQL ⚡", type="primary"):
         if nl_query.strip():
+            st.session_state["pending_query"] = nl_query.strip()
             st.session_state.pop("result", None)
-            _run_query(schema, nl_query.strip())
         else:
             st.warning("Please enter a query.")
 
-    # Sample prompts below the input
     if prompts:
         st.markdown("**Try a sample query:**")
         cols = st.columns(2)
@@ -369,16 +528,23 @@ def render_query_tab(schema: dict):
             with cols[i % 2]:
                 if st.button(
                     f"{color} **{complexity}** — {prompt_text}",
-                    key=f"prompt_{schema_id}_{i}",
+                    key=f"prompt_{prompt_key_prefix}_{i}",
                     use_container_width=True,
                 ):
+                    st.session_state["pending_query"] = prompt_text
                     st.session_state.pop("result", None)
-                    _run_query(schema, prompt_text)
 
+    # Results area — always rendered below all controls
+    if "pending_query" in st.session_state:
+        pending = st.session_state.pop("pending_query")
         st.markdown("---")
+        if cross_schema:
+            result = _run_query_cross(selected_schemas, pending)
+        else:
+            result = _run_query(schema, pending)
+        st.session_state["result"] = result
 
-    # Display persisted result
-    if "result" in st.session_state:
+    elif "result" in st.session_state:
         st.markdown("---")
         _display_result(st.session_state["result"])
 
@@ -420,13 +586,13 @@ def render_import_tab():
 
 def main():
     schemas = load_schemas()
-    selected = render_sidebar(schemas)
+    selected_schemas, cross_schema = render_sidebar(schemas)
 
     tab_query, tab_import = st.tabs(["🔍 Query Playground", "⬆ Import Schema"])
 
     with tab_query:
-        if selected:
-            render_query_tab(selected)
+        if schemas:
+            render_query_tab(selected_schemas, cross_schema)
         else:
             st.info("No schemas found. Import one or run the seed scripts.")
 

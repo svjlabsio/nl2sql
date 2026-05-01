@@ -25,7 +25,10 @@ def _extract_parts(text: str) -> tuple[str, str]:
     thinking_m = re.search(r"<thinking>(.*?)</thinking>", text, re.DOTALL)
     sql_m = re.search(r"<sql>(.*?)</sql>", text, re.DOTALL)
     thinking = thinking_m.group(1).strip() if thinking_m else ""
-    sql = sql_m.group(1).strip() if sql_m else text.strip()
+    if sql_m:
+        sql = sql_m.group(1).strip()
+    else:
+        sql = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL).strip()
     return thinking, sql
 
 
@@ -34,7 +37,7 @@ def _call_llm(system_prompt: str, messages: list[dict]) -> str:
     full_text = ""
     with _get_client().messages.stream(
         model="claude-sonnet-4-6",
-        max_tokens=2048,
+        max_tokens=4096,
         system=[
             {
                 "type": "text",
