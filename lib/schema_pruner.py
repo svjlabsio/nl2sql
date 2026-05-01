@@ -47,7 +47,7 @@ def get_columns_for_tables(table_ids: list[str]) -> dict[str, list[dict]]:
             SELECT table_id, name, data_type, is_nullable,
                    is_primary_key, is_foreign_key, fk_references, description
             FROM schema_columns
-            WHERE table_id = ANY(%s)
+            WHERE table_id = ANY(%s::uuid[])
             ORDER BY table_id, is_primary_key DESC, name
             """,
             (table_ids,),

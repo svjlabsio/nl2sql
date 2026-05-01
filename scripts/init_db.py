@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS schema_tables (
     schema_id   UUID NOT NULL REFERENCES registered_schemas(id) ON DELETE CASCADE,
     name        TEXT NOT NULL,
     description TEXT,
-    embedding   VECTOR(1536),
+    embedding   VECTOR(384),
     UNIQUE (schema_id, name)
 );
 
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS schema_columns (
     is_foreign_key BOOLEAN DEFAULT FALSE,
     fk_references  TEXT,
     description    TEXT,
-    embedding      VECTOR(1536),
+    embedding      VECTOR(384),
     UNIQUE (table_id, name)
 );
 
@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS few_shot_examples (
     schema_id UUID NOT NULL REFERENCES registered_schemas(id) ON DELETE CASCADE,
     nl_query  TEXT NOT NULL,
     sql_query TEXT NOT NULL,
-    embedding VECTOR(1536)
+    embedding VECTOR(384)
 );
 
 CREATE TABLE IF NOT EXISTS query_history (

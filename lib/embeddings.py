@@ -1,28 +1,26 @@
-import os
-from openai import OpenAI
-from dotenv import load_dotenv
+"""
+Local embeddings using sentence-transformers (no API key required).
+Model: all-MiniLM-L6-v2 — 384 dimensions, fast, good quality for semantic search.
+Downloaded automatically on first use (~90 MB, cached locally after that).
+"""
+from sentence_transformers import SentenceTransformer
 
-load_dotenv()
-
-_client: OpenAI | None = None
+_model: SentenceTransformer | None = None
 
 
-def _get_client() -> OpenAI:
-    global _client
-    if _client is None:
-        _client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    return _client
+def _get_model() -> SentenceTransformer:
+    global _model
+    if _model is None:
+        _model = SentenceTransformer("all-MiniLM-L6-v2")
+    return _model
 
 
 def embed(texts: list[str]) -> list[list[float]]:
-    """Embed a batch of texts using text-embedding-3-small."""
+    """Embed a batch of texts. Returns list of 384-dimensional vectors."""
     if not texts:
         return []
-    resp = _get_client().embeddings.create(
-        model="text-embedding-3-small",
-        input=texts,
-    )
-    return [d.embedding for d in resp.data]
+    vecs = _get_model().encode(texts, convert_to_numpy=True)
+    return vecs.tolist()
 
 
 def embed_one(text: str) -> list[float]:
