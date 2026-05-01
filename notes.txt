@@ -1,0 +1,6 @@
+I am a Cloud Platform engineer and wants to build a series of applicatin in Ai and want to show case them on a website
+I want to spend as little money as possible
+
+I am thinking to create one nl2sql application. architecture should we enterpise ready and should scale to thousands of users with high focus on aaccuracy. the nl2sql should be designed to handled hunders of schemas
+
+I ma thinking to use vercel and supabase. please evaluate the free teir and see if they are a good fit. also provide me few options that will cost less money
